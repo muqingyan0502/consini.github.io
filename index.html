@@ -115,6 +115,8 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent)}
 /* 弹窗 */
 .mask{position:fixed;inset:0;background:var(--overlay);z-index:2000;display:flex;align-items:center;justify-content:center;padding:24px}
 .dialog{background:var(--surface);border-radius:20px;width:88%;max-width:360px;padding:20px;animation:pop .14s ease}
+/* iOS 聚焦输入框时若字号小于16px会自动放大整个弹窗，统一提到16px防止缩放 */
+.dialog input,.dialog textarea,.dialog select{font-size:16px}
 @keyframes pop{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}
 .dialog h3{font-size:calc(17px * var(--fscale));font-weight:700;margin-bottom:14px}
 .dialog-actions{display:flex;justify-content:flex-end;gap:12px;margin-top:20px}
@@ -796,7 +798,7 @@ const RND={
 /* ============================================================
  * IndexedDB 层：单库多表，Blob 直接存
  * ============================================================ */
-const APP_VER='v-107p';
+const APP_VER='v-109c';
 const DB_NAME='dreamchat-v3',DB_VER=3;
 const STORES=['contacts','groups','sessions','messages','wordCards','wordCardCats','stickers','stickerCats',
 'pokeMsgs','pokeCats','greetings','redPackets','moments','momentLikes','momentComments','dilemmas',
@@ -1755,7 +1757,8 @@ function renderStickers(param){
   <input type="file" id="stFile" accept=".jpg,.jpeg,.png,.gif" multiple class="hidden">
   <div class="stat-line">共 ${pool.length} 个表情包</div>
   <div class="st-help" onclick="this.classList.toggle('open')"><span>使用说明（点击收起/展开）</span><div class="st-help-body">支持上传 动图GIF表情包（原图保存、动态播放），点击表情包即发送。<br>长按表情包进入多选管理，可批量删除，也可「转移/复制」到对方或我的表情包库。</div></div>
-  ${stPg.manage?`<div class="manage-bar"><span class="mg-count">已选 ${stPg.sel.length}</span>
+  ${stPg.manage?`<div class="manage-bar"><span class="mg-count">已选 ${stPg.sel.length} / ${pool.length}</span>
+    <button class="btn-sec btn-sm" onclick="selectAllStickers()">${pool.length&&stPg.sel.length===pool.length?'取消全选':'全选'}</button>
     <button class="btn-sec btn-sm" onclick="transferStickers(false)">转移</button>
     <button class="btn-danger btn-sm" onclick="deleteStickers()">删除</button>
     <button class="btn-sec btn-sm" onclick="stPg.manage=false;stPg.sel=[];renderStickers()">完成</button></div>`:''}
@@ -1773,6 +1776,13 @@ function renderStickers(param){
     }
   });
 }
+function selectAllStickers(){
+  let pool=state.stickers.filter(s=>s.owner===stPg.owner&&(stPg.owner==='me'||s.contactId===stPg.contactId));
+  if(stPg.q)pool=pool.filter(s=>(s.name||'').includes(stPg.q));
+  const allSelected=pool.length>0&&stPg.sel.length===pool.length;
+  stPg.sel=allSelected?[]:pool.map(s=>s.id);
+  renderStickers({keepManage:true});
+}
 async function deleteStickers(){
   if(!stPg.sel.length)return toast('未选择');
   showConfirm(`删除选中的 ${stPg.sel.length} 个表情包？`,async()=>{for(const id of stPg.sel)await dbDel('stickers',id);state.stickers=await dbAll('stickers');stPg.sel=[];stPg.manage=false;renderStickers();toast('已删除');});
@@ -1782,11 +1792,27 @@ async function transferStickers(move){
   let ids=stPg.manage&&stPg.sel.length?stPg.sel:currentPoolIds();
   if(!ids.length)return toast('没有可转移的表情包');
   const label=to==='me'?'我的表情包':((stPg.contactId?themName(stPg.contactId):'对方')+'的表情包');
+  // 全局页面（未指定联系人）转移到TA时，需要用户选择目标联系人，否则会存成看不见的孤儿
+  if(to==='dream'&&!stPg.contactId){
+    const opts=state.contacts.map(c=>`<option value="${c.id}">${esc(c.nickname||c.name||c.id)}</option>`).join('');
+    showDialog(`<h3>${move?'转移':'复制'}到哪位联系人的表情包</h3><div class="field"><select id="stTarget" style="width:100%;padding:10px;border-radius:10px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary)">${opts||'<option value="">暂无可选联系人</option>'}</select></div>`,
+    move?'转移':'复制',async()=>{
+      const cid=$('#stTarget').value;if(!cid)return toast('请选择联系人');
+      const sel=state.stickers.filter(s=>ids.includes(s.id));
+      for(const s of sel)await dbPut('stickers',{...s,id:uid(),owner:'dream',contactId:cid});
+      if(move){for(const s of sel)await dbDel('stickers',s.id);}
+      state.stickers=await dbAll('stickers');stPg.sel=[];stPg.manage=false;renderStickers({contactId:cid});toast(move?'已转移':'已复制');
+    });
+    return;
+  }
   showConfirm(`${ids.length} 个表情包${move?'转移':''}到「${label}」？（默认复制，原库保留）`,async()=>{
     const sel=state.stickers.filter(s=>ids.includes(s.id));
     for(const s of sel)await dbPut('stickers',{...s,id:uid(),owner:to,contactId:to==='dream'?stPg.contactId:null});
     if(move){for(const s of sel)await dbDel('stickers',s.id);}
-    state.stickers=await dbAll('stickers');stPg.sel=[];stPg.manage=false;renderStickers();toast(move?'已转移':'已复制');
+    state.stickers=await dbAll('stickers');stPg.sel=[];stPg.manage=false;
+    // 复制/转移后直接切到目标库显示，不用返回重进
+    stPg.owner=to;if(to==='me')stPg.contactId=null;
+    renderStickers();toast(move?'已转移':'已复制');
   });
 }
 async function uploadStickers(){
@@ -1836,7 +1862,7 @@ function openStickerPicker(){
   p.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{stPickerOwner=t.dataset.ow;stickerPickerRender();}));
   $('#stPFile').onchange=async e=>{
     const fs=[...e.target.files];
-    for(const f of fs){await dbPut('stickers',{id:uid(),owner:'me',contactId:null,dataUrl:await blobToDataURL(f),name:f.name,createdAt:nowStr()});}
+    for(const f of fs){await dbPut('stickers',{id:uid(),owner:stPickerOwner==='me'?'me':'dream',contactId:stPickerOwner==='dream'?stPickerCid:null,dataUrl:await blobToDataURL(f),name:f.name,createdAt:nowStr()});}
     state.stickers=await dbAll('stickers');stickerPickerRender();e.target.value='';toast('已添加');
   };
   stickerPickerRender();
@@ -2643,7 +2669,7 @@ function renderMusic(){
         :`<button class="music-up" onclick="toggleMulti()">多选</button>
         <button class="music-up" onclick="$('#musicFile').click()">＋ 上传</button>`}
     </div>
-    <input type="file" id="musicFile" accept="audio/*" multiple class="hidden">
+    <input type="file" id="musicFile" accept=".mp3,.m4a,.aac,.wav,.ogg,.opus,.flac,audio/*" multiple class="hidden">
     <div class="pl-list">${rows||'<div class="pl-empty">还没有歌曲，点右上角「＋ 上传」放进你的歌</div>'}</div>
   </div>`;
   $('#musicFile').onchange=uploadMusic;
@@ -2725,13 +2751,16 @@ async function uploadMusic(){
   const valid=fs.filter(f=>!f.type||f.type.startsWith('audio/')||/\.(mp3|m4a|aac|wav|ogg|opus|flac|weba|mp4)$/i.test(f.name));
   if(!valid.length){toast('请选择音频文件');if(input)input.value='';return;}
   let added=0,failed=0;const failedNames=[];
+  const isIOS=typeof navigator!=='undefined'&&(/iPad|iPhone|iPod/.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1));
   try{
     const pl=await ensurePlaylist(state.activeSessionId||'global');if(!Array.isArray(pl.items))pl.items=[];
-    // Blob 直接写入 IndexedDB，避免 Base64 编码带来的体积膨胀；每首独立处理。
+    // 非 iOS 用 Blob 直接写 IndexedDB（省空间）；iOS 的 IndexedDB 存 Blob 不可靠，取回后可能损坏导致无法播放，改用 dataURL 存储
     for(const f of valid){let objectUrl='';try{
-      const rec={id:uid(),name:f.name,audioBlob:f,createdAt:nowStr(),duration:0,size:f.size,type:f.type||'audio/*'};
-      objectUrl=URL.createObjectURL(f);rec.duration=await readAudioDur(objectUrl);await dbPut('music',rec);
-      musicObjectURLs.set(rec.id,objectUrl);objectUrl='';const old=state.music.findIndex(x=>x.id===rec.id);if(old>=0)state.music[old]=rec;else state.music.push(rec);
+      const rec={id:uid(),name:f.name,createdAt:nowStr(),duration:0,size:f.size,type:f.type||'audio/*'};
+      if(isIOS){rec.dataUrl=await blobToDataURL(f);}
+      else{rec.audioBlob=f;objectUrl=URL.createObjectURL(f);}
+      rec.duration=await readAudioDur(rec.dataUrl||objectUrl);await dbPut('music',rec);
+      if(objectUrl)musicObjectURLs.set(rec.id,objectUrl);objectUrl='';const old=state.music.findIndex(x=>x.id===rec.id);if(old>=0)state.music[old]=rec;else state.music.push(rec);
       if(!pl.items.includes(rec.id))pl.items.push(rec.id);added++;
     }catch(err){if(objectUrl)URL.revokeObjectURL(objectUrl);console.error('单首音乐导入失败',f.name,err);failed++;failedNames.push(f.name);}}
     if(added)await dbPut('playlists',pl);state.music=await dbAll('music');state.playlists=await dbAll('playlists');if(input)input.value='';refreshMusicUI();
@@ -2757,7 +2786,7 @@ async function removeSong(mid){
   });
 }
 function refreshMusicUI(){
-  if($('#togetherScreen')?.classList.contains('on')){openTogether();}
+  if($('#togetherScreen')?.classList.contains('on')){openTogether();tgTab('songs');}
   else if(state.route==='music'){renderMusic();}
   else {renderPlayer();}
 }
@@ -2843,7 +2872,7 @@ function openTogetherScreen(){
 function openTogether(){
   const t=state.together;if(!t)return;
   t.mode=t.mode||'list';
-  if(!$('#musicFile')){const fi=document.createElement('input');fi.type='file';fi.accept='audio/*';fi.multiple=true;fi.id='musicFile';fi.className='hidden';fi.onchange=uploadMusic;document.body.appendChild(fi);}
+  if(!$('#musicFile')){const fi=document.createElement('input');fi.type='file';fi.accept='.mp3,.m4a,.aac,.wav,.ogg,.opus,.flac,audio/*';fi.multiple=true;fi.id='musicFile';fi.className='hidden';fi.onchange=uploadMusic;document.body.appendChild(fi);}
   const me=state.config.profile||{};const meAv=avLoad('me')||(me.avatarBlob?avSrc(me.avatarBlob):null);
   const themAv=t.accepted&&t.contactId?avatarURL(contactById(t.contactId)):null;
   const themName=t.sTitle||'对方';
@@ -2915,7 +2944,7 @@ function openTogether(){
     </div>`;
   // 悬浮窗态：未连接只显示我的头像，含邀请按钮
   fl.innerHTML=`
-    <div class="tf-bar" ondblclick="closeTogether()" title="双击关闭">
+      <div class="tf-bar" title="双击关闭">
       <div style="width:26px;height:26px;border-radius:50%;overflow:hidden;flex:none;background:#C9B5DC;display:flex;align-items:center;justify-content:center;font-size:calc(12px * var(--fscale));color:#fff">${meAv?`<img src="${meAv}" style="width:100%;height:100%;object-fit:cover">`:esc((me.nickname||'我')[0])}</div>
       <div class="tf-songname" onclick="tgExpand()" title="放大为全屏">${hasSong?esc(t.song.name):'未在播放'}</div>
       <button class="tf-bt" onclick="togetherInvite()" title="邀请"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg></button>
@@ -2924,11 +2953,23 @@ function openTogether(){
       <button class="tf-bt" onclick="tgStep(1)" title="下一曲"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zM6 6v12l9-6z"/></svg></button>
     </div>`;
   sc.classList.add('on');fl.classList.remove('on');
+  // 兼容 iOS 的双击关闭：300ms 内两击触发；点歌名/按钮不算双击
+  bindDblTap(fl.querySelector('.tf-bar'),()=>closeTogether(),'.tf-bt,.tf-songname');
   setupFloatDrag(fl);
   if(hasSong){const same=audioEl&&state.player.song?.id===t.song.id;
     if(!same){loadTogetherSong(t.song,true);}else{audioEl.play().catch(()=>{});tgSyncState();}}
   renderPlayer();
   bindTogetherSongs();
+}
+function bindDblTap(el,fn,ignoreSel){
+  if(!el)return;
+  let last=0;
+  el.addEventListener('click',function(e){
+    if(ignoreSel&&e.target&&e.target.closest&&e.target.closest(ignoreSel))return;
+    const now=Date.now();
+    if(now-last<300){last=0;fn();}
+    else last=now;
+  });
 }
 function bindTogetherSongs(){
   const rows=$$('#tgPanelSongs .tg-srow');
@@ -3259,7 +3300,7 @@ async function renderContactDetail(cid){
   const c=contactById(cid);if(!c){go('contacts');return;}
   setTopTitle('详情');
   const au=avatarURL(c);
-  const cfg=await getCfg('reply_'+cid,{on:false,min:1,max:3,unit:'分钟',cMin:1,cMax:2,readNoReply:30,recall:20});
+  const dft={on:false,min:1,max:3,unit:'分钟',cMin:1,cMax:2,readNoReply:30,recall:20};
   const entries=[
     ['字卡库',cardIcon,()=>go('wordcard',{scope:'contact',contactId:cid})],
     ['表情包',stickerIcon,()=>go('sticker',{contactId:cid})],
@@ -3288,12 +3329,12 @@ async function renderContactDetail(cid){
   <div class="card">
     <div style="font-weight:700;margin-bottom:4px">聊天/回复设置</div>
     <div class="field" style="margin-top:8px"><label>回复时间范围（最短 ~ 最长）</label>
-      <div class="row"><input type="number" id="rMin" value="${cfg.min}" min="1"><span>-</span><input type="number" id="rMax" value="${cfg.max}" min="1">
-      <select id="rUnit" style="width:90px"><option ${cfg.unit==='秒'?'selected':''}>秒</option><option ${cfg.unit==='分钟'?'selected':''}>分钟</option><option ${cfg.unit==='小时'?'selected':''}>小时</option></select></div></div>
+      <div class="row"><input type="number" id="rMin" value="${dft.min}" min="1"><span>-</span><input type="number" id="rMax" value="${dft.max}" min="1">
+      <select id="rUnit" style="width:90px"><option ${dft.unit==='秒'?'selected':''}>秒</option><option ${dft.unit==='分钟'?'selected':''}>分钟</option><option ${dft.unit==='小时'?'selected':''}>小时</option></select></div></div>
     <div class="field"><label>每次回复条数</label>
-      <div class="row"><input type="number" id="rCMin" value="${cfg.cMin}" min="1"><span>-</span><input type="number" id="rCMax" value="${cfg.cMax}" min="1"></div></div>
-    <div class="field"><label>已读不回概率：<b id="vRNR">${cfg.readNoReply}%</b></label><input type="range" id="rRNR" min="1" max="100" value="${cfg.readNoReply}"></div>
-    <div class="field"><label>撤回概率：<b id="vRCL">${cfg.recall}%</b></label><input type="range" id="rRCL" min="1" max="100" value="${cfg.recall}"></div>
+      <div class="row"><input type="number" id="rCMin" value="${dft.cMin}" min="1"><span>-</span><input type="number" id="rCMax" value="${dft.cMax}" min="1"></div></div>
+    <div class="field"><label>已读不回概率：<b id="vRNR">${dft.readNoReply}%</b></label><input type="range" id="rRNR" min="1" max="100" value="${dft.readNoReply}"></div>
+    <div class="field"><label>撤回概率：<b id="vRCL">${dft.recall}%</b></label><input type="range" id="rRCL" min="1" max="100" value="${dft.recall}"></div>
     <p class="tiny" style="margin-top:8px">你发消息后，TA会在最短~最长之间随机等到一个时间点自动回你（无需开关，改动即自动保存）。</p>
   </div>
 
@@ -3332,6 +3373,16 @@ async function renderContactDetail(cid){
   <div class="card danger-card" style="margin-top:18px;padding:0;border:1px solid #E0443A;border-radius:12px;overflow:hidden">
     <button class="danger-btn" onclick="removeContact('${cid}')" style="width:100%;padding:14px;background:#fff;color:#E0443A;border:none;font-size:calc(15px * var(--fscale));text-align:center;font-weight:600">删除联系人</button>
   </div>`;
+  // 先渲染完成，再异步读取配置填充，避免读取慢/出错时页面停留在上一页
+  let cfg=dft;
+  try{cfg=await getCfg('reply_'+cid,dft);}catch(e){console.error('回复配置读取失败',e);}
+  const setV=(id,v)=>{const el=$('#'+id);if(el)el.value=v;};
+  setV('rMin',cfg.min);setV('rMax',cfg.max);
+  const uEl=$('#rUnit');if(uEl)uEl.value=cfg.unit||'分钟';
+  setV('rCMin',cfg.cMin);setV('rCMax',cfg.cMax);
+  setV('rRNR',cfg.readNoReply);setV('rRCL',cfg.recall);
+  const vRNR=$('#vRNR');if(vRNR)vRNR.textContent=cfg.readNoReply+'%';
+  const vRCL=$('#vRCL');if(vRCL)vRCL.textContent=cfg.recall+'%';
   $$('#view [data-e]').forEach(el=>el.addEventListener('click',()=>entries[+el.dataset.e][2]()));
   $$('#view [data-extra]').forEach(el=>el.addEventListener('click',()=>go('qBank')));
   $$('#view [data-act]').forEach(el=>{
@@ -3666,10 +3717,9 @@ function renderWaimaiSpin(cid){
     <div class="row" style="justify-content:center;gap:10px;margin-top:16px;flex-wrap:wrap">
       <button class="btn-main" onclick="spinWheel(false)">自己转一下</button>
       <button class="btn-sec" onclick="spinWheel(true)">让${esc(them)}帮选</button>
-      <button class="btn-sec btn-sm" onclick="openSpinCustom()">自定义</button>
     </div>
     <div id="spinResult" style="margin-top:16px;min-height:48px"></div>
-    <div class="muted" style="font-size:calc(11px * var(--fscale));margin-top:10px">转盘共 ${spinFoodPool().length} 个食物 · 点击扇区可修改 · 支持自定义添加</div>
+    <div class="muted" style="font-size:calc(11px * var(--fscale));margin-top:10px">转盘共 ${spinFoodPool().length} 个食物 · 点击扇区可修改或删除</div>
   </div>`;
   spinAngle=0;
   const cv=$('#spinWheel');if(cv)drawWheel(cv,0);
@@ -3729,7 +3779,7 @@ function editSpinFood(idx){
   const w=waimaiState();const foods=spinFoodPool();
   if(idx<0||idx>=foods.length)return;
   const old=foods[idx];
-  showDialog(`<h3>修改扇区食物</h3><div class="field"><label>新的名称</label><input type="text" id="spinEdit" value="${esc(old)}" maxlength="8"></div><p class="muted" style="font-size:calc(11px * var(--fscale))">改动后会立即更新到转盘上</p>`,'保存',async()=>{
+  showDialog(`<h3>修改扇区食物</h3><div class="field"><label>新的名称</label><input type="text" id="spinEdit" value="${esc(old)}" maxlength="8"></div><div class="row" style="gap:8px;margin:2px 0"><button class="btn-danger btn-sm" onclick="spinRemoveCust(${idx})">删除这个食物</button></div><p class="muted" style="font-size:calc(11px * var(--fscale))">改动后会立即更新到转盘上</p>`,'保存',async()=>{
     const v=$('#spinEdit').value.trim();if(!v)return toast('不能为空');
     if(v===old){closeDialog();return;}
     const w2=waimaiState();
@@ -3796,7 +3846,7 @@ function spinRemoveCust(i){
   if(!w.spinList||!w.spinList.length)w.spinList=spinFoodPool().slice();
   w.spinList.splice(i,1);
   if(!w.spinList.length)w.spinList=spinBaseFoods.slice();
-  saveWaimai(w).then(()=>{openSpinCustom();});
+  saveWaimai(w).then(()=>{closeDialog();renderWaimaiSpin(state.shopCid);toast('已删除');});
 }
 function showTaGift(g,note){
   const them=state.shopCid?themName(state.shopCid):'对方';
@@ -4095,8 +4145,12 @@ async function maybeAutoReply(sid, lastMsg){
   const unitMs={秒:1000,分钟:60000,小时:3600000}[cfg.unit||'分钟'];
   const delay=RND.intInclusive(cfg.min||1,cfg.max||3)*unitMs;
   const typingText=(cfg.typing||'').trim()||'对方正在输入';
-  showTyping(sid,typingText);
-  setTimeout(async()=>{
+  // === 回复排队：每条消息都有回应（每次按设置的条数回），回复之间按 min~max 间隔依次发出，不密集连发、不合并 ===
+  state.arQueue=state.arQueue||{};state.arTimers=state.arTimers||{};
+  state.arQueue[sid]=(state.arQueue[sid]||0)+1;
+  if(state.arTimers[sid])return; // 队列已在跑，本条消息已入队排队等回复
+  const fire=async()=>{
+    state.arTimers[sid]=null;
     const ratio=await getCfg('replyRatio_'+s.contactId,await getCfg('replyRatio_global',{sticker:40,wordcard:60}));
     const n=RND.sampleCount(cfg.cMin||1,cfg.cMax||2);
     const pool=await cardPool(s.contactId);
@@ -4125,10 +4179,16 @@ async function maybeAutoReply(sid, lastMsg){
     } else if(hasWc){await sendWc();sent=true;}
     else if(hasStk){await sendStk();sent=true;}
     hideTyping(sid);
-    if(!sent)return;
-    s.lastTime=nowStr();await upsertSession(s);
-    if(state.route==='chat'&&state.activeSessionId===sid)appendNewMsgs(sid);
-  },delay);
+    if(sent){s.lastTime=nowStr();await upsertSession(s);if(state.route==='chat'&&state.activeSessionId===sid)appendNewMsgs(sid);}
+    state.arQueue[sid]=Math.max(0,(state.arQueue[sid]||0)-1);
+    if(state.arQueue[sid]>0){
+      // 队列还有下一条：再过 min~max 随机间隔继续回，每条都满足最短等待
+      state.arTimers[sid]=setTimeout(fire,RND.intInclusive(cfg.min||1,cfg.max||3)*unitMs);
+      showTyping(sid,typingText);
+    }
+  };
+  showTyping(sid,typingText);
+  state.arTimers[sid]=setTimeout(fire,delay);
 }
 let typingSid=null;
 function showTyping(sid,text){typingSid=sid;const el=$('#cname');if(!el||state.activeSessionId!==sid)return;if(!el.dataset.orig)el.dataset.orig=el.textContent;el.innerHTML=esc((text||'对方正在输入')+' ')+'<span class="tdots"><i></i><i></i><i></i></span>';el.classList.add('typing');}
